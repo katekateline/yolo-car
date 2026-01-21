@@ -369,30 +369,31 @@ class VehicleDetector:
         image_files.sort()
         
         if not image_files:
-            print(f"❌ Tidak ada gambar ditemukan di folder '{input_folder}'")
-            print(f"   Pastikan folder '{input_folder}' ada dan berisi gambar")
+            print(f"\nERROR: No images found in '{input_folder}'")
+            print(f"Please ensure the '{input_folder}' directory exists and contains images.")
             return
         
-        print("=" * 70)
-        print(f"🚗 DEMO DETEKSI KENDARAAN")
-        print("=" * 70)
-        print(f"📁 Input folder: {input_folder}")
-        print(f"📁 Output folder: {output_folder}")
-        print(f"🖼️  Total gambar: {len(image_files)}")
-        print("=" * 70)
+        print("\n" + "="*80)
+        print(" "*25 + "VEHICLE DETECTION SYSTEM")
+        print("="*80)
+        print(f"Input Directory  : {input_folder}")
+        print(f"Output Directory : {output_folder}")
+        print(f"Total Images     : {len(image_files)}")
+        print("="*80 + "\n")
         
         total_vehicles = 0
         
         for idx, image_file in enumerate(image_files, 1):
-            print(f"\n[{idx}/{len(image_files)}] Processing: {image_file.name}")
-            print("-" * 70)
+            print(f"[{idx}/{len(image_files)}] Processing: {image_file.name}")
+            print("-"*80)
             
             try:
                 # Proses gambar
                 image = cv2.imread(str(image_file))
                 
                 if image is None:
-                    print(f"   ⚠️  Gagal membaca: {image_file.name}")
+                    print(f"WARNING: Failed to read {image_file.name}")
+                    print()
                     continue
                 
                 annotated_image, detections = self.process_frame(image)
@@ -401,7 +402,7 @@ class VehicleDetector:
                 vehicle_count = len(detections)
                 total_vehicles += vehicle_count
                 
-                print(f"   ✓ Terdeteksi: {vehicle_count} kendaraan")
+                print(f"Detected Vehicles: {vehicle_count}")
                 
                 if detections:
                     # Grup berdasarkan tipe
@@ -411,30 +412,36 @@ class VehicleDetector:
                     type_count = Counter(types)
                     color_count = Counter(colors)
                     
-                    print(f"   📊 Tipe: {dict(type_count)}")
-                    print(f"   🎨 Warna: {dict(color_count)}")
+                    print(f"Vehicle Types    : {dict(type_count)}")
+                    print(f"Color Distribution: {dict(color_count)}")
+                    print()
                     
                     # Detail setiap kendaraan
+                    print("Details:")
                     for i, det in enumerate(detections, 1):
-                        print(f"      {i}. {det['type'].upper()} {det['color']} "
-                              f"({det['confidence']:.1%})")
+                        print(f"  [{i}] {det['type'].capitalize():12} | "
+                              f"Color: {det['color'].capitalize():10} | "
+                              f"Confidence: {det['confidence']:.1%}")
                 
                 # Save hasil
                 output_path = Path(output_folder) / f"detected_{image_file.name}"
                 cv2.imwrite(str(output_path), annotated_image)
-                print(f"   💾 Saved: {output_path}")
+                print(f"\nOutput saved to: {output_path}")
                 
             except Exception as e:
-                print(f"   ❌ Error: {str(e)}")
+                print(f"ERROR: {str(e)}")
+            
+            print()
         
         # Summary
-        print("\n" + "=" * 70)
-        print("📈 RINGKASAN")
-        print("=" * 70)
-        print(f"   Total gambar diproses: {len(image_files)}")
-        print(f"   Total kendaraan terdeteksi: {total_vehicles}")
-        print(f"   Hasil tersimpan di: {output_folder}")
-        print("=" * 70)
+        print("="*80)
+        print(" "*32 + "PROCESSING SUMMARY")
+        print("="*80)
+        print(f"Total Images Processed    : {len(image_files)}")
+        print(f"Total Vehicles Detected   : {total_vehicles}")
+        print(f"Average Vehicles per Image: {total_vehicles/len(image_files):.2f}" if image_files else "0.00")
+        print(f"Results Directory         : {output_folder}")
+        print("="*80 + "\n")
 
 
 # ============= DEMO EXECUTION =============
@@ -442,47 +449,48 @@ class VehicleDetector:
 if __name__ == "__main__":
     import os
     
-    print("\n🚀 Memulai Demo Deteksi Kendaraan...")
-    print("=" * 70)
+    print("\nInitializing Vehicle Detection System...")
+    print("="*80)
     
     # Cek folder images
     if not os.path.exists('images'):
-        print("❌ Folder 'images/' tidak ditemukan!")
-        print("   Membuat folder 'images/'...")
+        print("\nERROR: Directory 'images/' not found!")
+        print("Creating 'images/' directory...")
         os.makedirs('images', exist_ok=True)
-        print("   ✓ Folder 'images/' telah dibuat")
-        print("\n📝 Instruksi:")
-        print("   1. Letakkan gambar kendaraan di folder 'images/'")
-        print("   2. Jalankan script ini lagi")
-        print("=" * 70)
+        print("SUCCESS: Directory 'images/' has been created.\n")
+        print("Instructions:")
+        print("  1. Place vehicle images in the 'images/' directory")
+        print("  2. Run this script again")
+        print("="*80)
     else:
         # Initialize detector
-        # Pilih model sesuai kebutuhan:
-        # - yolov8n.pt (paling cepat, akurasi standar)
-        # - yolov8s.pt (cepat, akurasi baik)
-        # - yolov8m.pt (balance, recommended untuk demo)
-        # - yolov8l.pt (lambat, akurasi tinggi)
-        # - yolov8x.pt (paling lambat, akurasi maksimal)
+        # Available models (sorted by accuracy):
+        # - yolov8n.pt (fastest, standard accuracy)
+        # - yolov8s.pt (fast, good accuracy)
+        # - yolov8m.pt (balanced, recommended for demo)
+        # - yolov8l.pt (slower, high accuracy)
+        # - yolov8x.pt (slowest, maximum accuracy)
         
         try:
             detector = VehicleDetector(
-                model_path='model/yolov8m.pt',  # Ubah sesuai model yang ada
-                confidence=0.4  # Turunkan sedikit untuk demo agar lebih banyak deteksi
+                model_path='model/yolov8m.pt',
+                confidence=0.4
             )
             
-            # Proses semua gambar di folder images/
+            # Process all images in the images/ directory
             detector.process_all_images(
                 input_folder='images/',
                 output_folder='output/'
             )
             
-            print("\n✅ Demo selesai! Cek folder 'output/' untuk melihat hasil.")
+            print("Processing completed successfully.")
+            print("Check the 'output/' directory for results.\n")
             
         except Exception as e:
-            print(f"\n❌ Error: {str(e)}")
-            print("\n💡 Troubleshooting:")
-            print("   1. Pastikan model ada di folder 'model/' (contoh: model/yolov8m.pt)")
-            print("   2. Download model dengan:")
-            print("      wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8m.pt -P model/")
-            print("   3. Atau gunakan model lain yang sudah ada")
-            print("=" * 70)
+            print(f"\nERROR: {str(e)}\n")
+            print("Troubleshooting:")
+            print("  1. Ensure the model exists in 'model/' directory (e.g., model/yolov8m.pt)")
+            print("  2. Download the model using:")
+            print("     wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8m.pt -P model/")
+            print("  3. Or use a different model that is already available")
+            print("="*80)
