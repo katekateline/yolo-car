@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 import os
 import json
 from pathlib import Path
+import urllib.request
+from collections import Counter
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS untuk komunikasi dengan Laravel
@@ -238,6 +240,80 @@ def cleanup_old_cars():
     return len(cars_to_remove)
 
 
+def download_yolo_model(model_name='yolov8m.pt', model_dir='model'):
+    """
+    Download model YOLO secara otomatis jika belum ada
+    
+    Args:
+        model_name: Nama model yang akan didownload (default: yolov8m.pt - optimal)
+        model_dir: Direktori untuk menyimpan model
+    
+    Returns:
+        str: Path ke model yang didownload atau nama model untuk YOLO
+    """
+    os.makedirs(model_dir, exist_ok=True)
+    model_path = os.path.join(model_dir, model_name)
+    
+    if os.path.exists(model_path):
+        return model_path
+    
+    print(f"\nModel {model_name} tidak ditemukan. Mengunduh model optimal...")
+    print("   (Ini mungkin memakan waktu beberapa menit, tergantung koneksi internet)")
+    
+    try:
+        # Method 1: Gunakan YOLO untuk download (paling reliable)
+        # YOLO akan otomatis download ke cache jika model tidak ada
+        print(f"   Mengunduh menggunakan YOLO...")
+        temp_model = YOLO(model_name)
+        
+        # Cek apakah model sudah terdownload di cache YOLO
+        # YOLO menyimpan di ~/.ultralytics/weights/ atau di cache
+        # Kita bisa langsung menggunakan nama model, YOLO akan handle path-nya
+        print(f"[OK] Model {model_name} berhasil diunduh ke cache YOLO!")
+        
+        # Coba copy ke folder model jika memungkinkan
+        try:
+            from ultralytics.utils import SETTINGS
+            cache_dir = SETTINGS.get('weights_dir', None)
+            if cache_dir:
+                cache_path = os.path.join(cache_dir, model_name)
+                if os.path.exists(cache_path):
+                    import shutil
+                    shutil.copy2(cache_path, model_path)
+                    print(f"[OK] Model disalin ke: {model_path}")
+                    return model_path
+        except:
+            pass
+        
+        # Return nama model, YOLO akan handle path dari cache
+        return model_name
+        
+    except Exception as e:
+        print(f"[WARNING] Error saat download dengan YOLO: {str(e)}")
+        print("   Mencoba download manual dari GitHub...")
+        
+        # Fallback: download manual dari GitHub
+        try:
+            url = f"https://github.com/ultralytics/assets/releases/download/v0.0.0/{model_name}"
+            print(f"   Downloading from: {url}")
+            
+            def show_progress(block_num, block_size, total_size):
+                downloaded = block_num * block_size
+                percent = min(downloaded * 100 / total_size, 100)
+                print(f"\r   Progress: {percent:.1f}%", end='', flush=True)
+            
+            urllib.request.urlretrieve(url, model_path, show_progress)
+            print(f"\n[OK] Model {model_name} berhasil diunduh ke: {model_path}")
+            return model_path
+            
+        except Exception as e2:
+            print(f"\n[ERROR] Gagal download model: {str(e2)}")
+            print(f"\nSolusi manual:")
+            print(f"   1. Download dari: https://github.com/ultralytics/assets/releases/download/v0.0.0/{model_name}")
+            print(f"   2. Simpan di: {os.path.abspath(model_dir)}/")
+            return None
+
+
 def update_car_tracking(new_detections, image_path=None):
     """
     Update tracking dengan deteksi baru, hanya simpan mobil terbaru
@@ -347,28 +423,53 @@ def detect_vehicles():
         # Update tracking (hanya mobil terbaru)
         latest_cars = update_car_tracking(detections, image_path)
         
-        # Format response untuk Laravel
+        # Hitung statistik
+        cars_only = [d for d in detections if d['type'] == 'mobil']
+        image_height, image_width = frame.shape[:2]
+        
+        # Statistik warna mobil
+        car_colors = Counter([d['color'] for d in cars_only])
+        
+        # Format response yang lebih simple dan lengkap
         response_data = {
             'success': True,
-            'timestamp': datetime.now().isoformat(),
-            'total_detections': len(detections),
-            'cars_detected': len([d for d in detections if d['type'] == 'mobil']),
-            'latest_cars': [
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'image_info': {
+                'width': int(image_width),
+                'height': int(image_height),
+                'size': f"{image_width}x{image_height}"
+            },
+            'summary': {
+                'total_vehicles': len(detections),
+                'cars': len(cars_only),
+                'others': len(detections) - len(cars_only)
+            },
+            'cars': [
                 {
                     'id': car_id,
                     'type': car_data['detection']['type'],
                     'color': car_data['detection']['color'],
-                    'confidence': car_data['detection']['confidence'],
+                    'confidence': round(car_data['detection']['confidence'] * 100, 1),
+                    'position': {
+                        'x': car_data['detection']['bbox'][0],
+                        'y': car_data['detection']['bbox'][1],
+                        'width': car_data['detection']['bbox'][2] - car_data['detection']['bbox'][0],
+                        'height': car_data['detection']['bbox'][3] - car_data['detection']['bbox'][1]
+                    },
                     'bbox': car_data['detection']['bbox'],
-                    'detected_at': car_data['timestamp'].isoformat()
+                    'detected_at': car_data['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
                 }
                 for car_id, car_data in latest_cars.items()
             ],
-            'all_detections': [
+            'statistics': {
+                'color_distribution': dict(car_colors),
+                'average_confidence': round(sum([d['confidence'] for d in cars_only]) / len(cars_only) * 100, 1) if cars_only else 0
+            },
+            'all_vehicles': [
                 {
                     'type': d['type'],
                     'color': d['color'],
-                    'confidence': d['confidence'],
+                    'confidence': round(d['confidence'] * 100, 1),
                     'bbox': d['bbox']
                 }
                 for d in detections
@@ -393,27 +494,41 @@ def get_latest_cars():
         # Bersihkan mobil lama
         removed_count = cleanup_old_cars()
         
-        # Format response
-        latest_cars = [
-            {
+        # Format response yang lebih simple dan lengkap
+        latest_cars = []
+        color_stats = Counter()
+        
+        for car_id, car_data in car_tracking.items():
+            car_info = {
                 'id': car_id,
                 'type': car_data['detection']['type'],
                 'color': car_data['detection']['color'],
-                'confidence': car_data['detection']['confidence'],
+                'confidence': round(car_data['detection']['confidence'] * 100, 1),
+                'position': {
+                    'x': car_data['detection']['bbox'][0],
+                    'y': car_data['detection']['bbox'][1],
+                    'width': car_data['detection']['bbox'][2] - car_data['detection']['bbox'][0],
+                    'height': car_data['detection']['bbox'][3] - car_data['detection']['bbox'][1]
+                },
                 'bbox': car_data['detection']['bbox'],
-                'detected_at': car_data['timestamp'].isoformat(),
+                'detected_at': car_data['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
                 'image_path': car_data.get('image_path')
             }
-            for car_id, car_data in car_tracking.items()
-        ]
+            latest_cars.append(car_info)
+            color_stats[car_data['detection']['color']] += 1
         
         # Sort berdasarkan timestamp terbaru
         latest_cars.sort(key=lambda x: x['detected_at'], reverse=True)
         
         return jsonify({
             'success': True,
-            'total_cars': len(latest_cars),
-            'removed_old_cars': removed_count,
+            'summary': {
+                'total_cars': len(latest_cars),
+                'removed_old_cars': removed_count
+            },
+            'statistics': {
+                'color_distribution': dict(color_stats)
+            },
             'cars': latest_cars
         }), 200
         
@@ -441,33 +556,69 @@ def clear_tracking():
 
 if __name__ == '__main__':
     # Initialize detector
-    print("Initializing Vehicle Detection API...")
+    print("\n" + "="*80)
+    print("Vehicle Detection API - Initializing...")
     print("="*80)
     
-    # Cek model
-    model_path = 'model/yolov8n.pt'
+    # Model optimal: yolov8m.pt (balance antara speed dan accuracy)
+    optimal_model = 'yolov8m.pt'
+    model_path = f'model/{optimal_model}'
+    
+    # Cek apakah model sudah ada
     if not os.path.exists(model_path):
-        # Coba model lain
-        for model_name in ['yolov8m.pt', 'yolov8s.pt', 'yolov8l.pt']:
+        # Coba cari model lain yang mungkin sudah ada
+        existing_models = ['yolov8n.pt', 'yolov8s.pt', 'yolov8l.pt', 'yolov8x.pt']
+        found_model = None
+        
+        for model_name in existing_models:
             alt_path = f'model/{model_name}'
             if os.path.exists(alt_path):
                 model_path = alt_path
+                found_model = model_name
+                print(f"[OK] Found existing model: {model_name}")
                 break
+        
+        # Jika tidak ada model sama sekali, download yang optimal
+        if not found_model:
+            print(f"\nModel tidak ditemukan. Mengunduh model optimal: {optimal_model}")
+            downloaded_path = download_yolo_model(optimal_model)
+            
+            if downloaded_path:
+                # Jika download berhasil, gunakan model tersebut
+                if os.path.exists(f'model/{optimal_model}'):
+                    model_path = f'model/{optimal_model}'
+                else:
+                    # YOLO menyimpan di cache, gunakan nama model saja
+                    model_path = optimal_model
+            else:
+                print("\n[ERROR] Gagal mengunduh model. Silakan download manual:")
+                print(f"   https://github.com/ultralytics/assets/releases/download/v0.0.0/{optimal_model}")
+                print(f"   Simpan di: {os.path.abspath('model/')}")
+                exit(1)
+    else:
+        print(f"[OK] Model ditemukan: {optimal_model}")
     
-    if not os.path.exists(model_path):
-        print(f"ERROR: Model not found at {model_path}")
-        print("Please ensure YOLO model exists in model/ directory")
+    # Initialize detector
+    try:
+        detector = VehicleDetector(model_path=model_path, confidence=0.4)
+        print(f"[OK] Detector initialized successfully")
+        print(f"[OK] Model: {model_path}")
+        print(f"[OK] Confidence threshold: 0.4")
+    except Exception as e:
+        print(f"\n[ERROR] Error initializing detector: {str(e)}")
+        print("\nTroubleshooting:")
+        print("  1. Pastikan model YOLO ada di folder model/")
+        print("  2. Coba download model manual dari:")
+        print(f"     https://github.com/ultralytics/assets/releases/download/v0.0.0/{optimal_model}")
         exit(1)
     
-    detector = VehicleDetector(model_path=model_path, confidence=0.4)
-    print(f"✓ Model loaded: {model_path}")
     print("="*80)
     print("API Server starting on http://localhost:5000")
-    print("Endpoints:")
-    print("  POST /detect - Detect vehicles from image")
-    print("  GET  /latest-cars - Get latest detected cars")
-    print("  GET  /health - Health check")
-    print("="*80)
+    print("\nAvailable Endpoints:")
+    print("  POST /detect        - Detect vehicles from image")
+    print("  GET  /latest-cars   - Get latest detected cars")
+    print("  GET  /health        - Health check")
+    print("="*80 + "\n")
     
     # Run Flask app
     app.run(host='0.0.0.0', port=5000, debug=True)
