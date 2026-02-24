@@ -2,3 +2,4 @@
 *.pt
 __pycache__/
 .env
+yolo_service/storage/
