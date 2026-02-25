@@ -66,37 +66,48 @@ def get_dominant_color(frame, bbox):
 
 
 def _rgb_to_color_name(r, g, b):
-    """Mapping RGB rata-rata ke nama warna (cepat, tanpa K-Means)."""
-    v = max(r, g, b)
-    v_min = min(r, g, b)
-    s = (v - v_min) / (v + 1e-6)
-    # Hitam
-    if v < 70:
+    """
+    Mapping warna rata-rata ke nama warna menggunakan HSV
+    (lebih stabil untuk putih/abu/orange/kuning).
+    """
+    # OpenCV pakai BGR, jadi buat pixel BGR dan konversi ke HSV
+    bgr_pixel = np.uint8([[[b, g, r]]])
+    hsv = cv2.cvtColor(bgr_pixel, cv2.COLOR_BGR2HSV)[0, 0]
+    h, s, v = int(hsv[0]), int(hsv[1]), int(hsv[2])
+
+    # 1. Hitam / sangat gelap
+    if v < 40:
         return "hitam"
-    # Putih
-    if v > 200 and s < 0.2:
+
+    # 2. Putih (sangat terang, saturasi rendah)
+    if v > 210 and s < 40:
         return "putih"
-    # Abu / Silver (saturasi rendah)
-    if s < 0.25:
-        return "silver" if v > 160 else "abu"
-    # Chromatic: dominan hue
-    if r >= g and r >= b:
-        if g < 100 and b < 100:
-            return "merah"
-        if r - g < 30 and r - b < 30:
-            return "orange"
+
+    # 3. Abu / silver (saturasi rendah, tapi tidak seputih putih)
+    if s < 40:
+        if v >= 180:
+            return "silver"
+        return "abu"
+
+    # 4. Warna kromatik berdasarkan Hue (H: 0–179)
+    # Red: sekitar 0 atau 180
+    if h < 10 or h >= 170:
         return "merah"
-    if g >= r and g >= b:
-        if r < 80 and b < 80:
-            return "hijau"
-        if g - r < 40 and g - b < 40:
-            return "kuning"
+    # Orange: 10–24
+    if 10 <= h < 24:
+        return "orange"
+    # Kuning: 24–35
+    if 24 <= h < 35:
+        return "kuning"
+    # Hijau: 35–85
+    if 35 <= h < 85:
         return "hijau"
-    if b >= r and b >= g:
-        if r > 150 and g > 100:
-            return "ungu"
+    # Biru: 85–130
+    if 85 <= h < 130:
         return "biru"
-    # Coklat: merah+kuning gelap
-    if 80 < r < 180 and 50 < g < 150 and b < 100:
-        return "coklat"
+    # Ungu / magenta: 130–170
+    if 130 <= h < 170:
+        return "ungu"
+
+    # Fallback
     return "abu"

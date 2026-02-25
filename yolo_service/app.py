@@ -26,6 +26,9 @@ LARAVEL_MODE = False
 CAPTURE_INTERVAL_SEC = 5
 STORAGE_DIR = os.path.join(os.path.dirname(__file__), "storage")
 
+# True = hapus foto jika tidak ada kendaraan terdeteksi; False = simpan semua foto
+DELETE_IMAGE_IF_NO_VEHICLE = True
+
 # Model YOLO
 MODEL_PATH = "best.pt"
 MODEL_ROOT = "yolov8m.pt"
@@ -83,6 +86,19 @@ def save_frame(frame, filename_base=None):
     except Exception as e:
         print(f"[WARN] Gagal simpan foto: {e}")
         return None, None
+
+
+def delete_image(path_abs):
+    """Hapus file gambar jika ada. Returns True jika berhasil atau file tidak ada."""
+    if not path_abs:
+        return True
+    try:
+        if os.path.isfile(path_abs):
+            os.remove(path_abs)
+            return True
+    except Exception as e:
+        print(f"[WARN] Gagal hapus gambar: {e}")
+    return False
 
 
 def log_frame_analysis(photo_path, detections, timestamp_str=None):
@@ -199,6 +215,9 @@ def capture_and_detect():
 
         if not detections:
             print(f"[INFO] {path_rel} -> Tidak ada kendaraan")
+            if DELETE_IMAGE_IF_NO_VEHICLE:
+                if delete_image(path_abs):
+                    print(f"[INFO] Gambar dihapus (tidak ada kendaraan): {path_rel}")
             continue
 
         # 3. Ada kendaraan: log + update JSON

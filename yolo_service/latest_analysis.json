@@ -1,0 +1,18 @@
+{
+  "photo": "storage\\20260225_083812.jpg",
+  "timestamp": "2026-02-25 08:38:12",
+  "updated_at": "2026-02-25T08:38:13.474774",
+  "detections": [
+    {
+      "vehicle_type": "motorcycle",
+      "color": "merah",
+      "confidence": 0.949,
+      "bbox": [
+        186,
+        237,
+        924,
+        748
+      ]
+    }
+  ]
+}
