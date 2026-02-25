@@ -19,6 +19,13 @@ app = Flask(__name__)
 WEBCAM_URL = "http://localhost:8080/video"
 LARAVEL_URL = "http://park-it.test/api/detection"
 
+# PlateRecognizer (API plat nomor)
+PLATERECOGNIZER_URL = "https://api.platerecognizer.com/v1/plate-reader/"
+# Token diambil dari environment variable: PLATERECOGNIZER_TOKEN
+PLATERECOGNIZER_TOKEN = os.getenv("PLATERECOGNIZER_TOKEN", "71ec7eb1f904d47da060fa4bd532d76cc18edeee")
+# Optional: region plate, contoh: ["id"] atau ["us-ca"]
+PLATERECOGNIZER_REGIONS = None  # bisa dioverride via env jika perlu
+
 # Mode: False = CLI (output CMD saja), True = Laravel (POST + Flask)
 LARAVEL_MODE = False
 
@@ -70,6 +77,49 @@ def ensure_detector():
     return _detector
 
 
+def recognize_plate(image_path):
+    """
+    Panggil API PlateRecognizer untuk membaca plat nomor dari gambar.
+    Returns dict minimal: {"plate": str | None} atau None jika gagal/tidak ada.
+    """
+    if not PLATERECOGNIZER_TOKEN:
+        # Jika belum ada token, skip quietly
+        return None
+
+    if not os.path.isfile(image_path):
+        return None
+
+    try:
+        data = {}
+        if PLATERECOGNIZER_REGIONS:
+            data["regions"] = PLATERECOGNIZER_REGIONS
+
+        with open(image_path, "rb") as fp:
+            response = requests.post(
+                PLATERECOGNIZER_URL,
+                data=data,
+                files={"upload": fp},
+                headers={"Authorization": f"Token {PLATERECOGNIZER_TOKEN}"},
+                timeout=10,
+            )
+
+        if not response.ok:
+            print(f"[WARN] PlateRecognizer status {response.status_code}: {response.text[:200]}")
+            return None
+
+        res_json = response.json()
+        results = res_json.get("results") or []
+        if not results:
+            return None
+
+        first = results[0]
+        plate = first.get("plate")
+        return {"plate": plate}
+    except Exception as e:
+        print(f"[WARN] Gagal panggil PlateRecognizer: {e}")
+        return None
+
+
 def save_frame(frame, filename_base=None):
     """
     Simpan frame sebagai foto di folder storage.
@@ -101,7 +151,7 @@ def delete_image(path_abs):
     return False
 
 
-def log_frame_analysis(photo_path, detections, timestamp_str=None):
+def log_frame_analysis(photo_path, detections, timestamp_str=None, plate_number=None):
     """Append hasil analisis ke frame_analysis.jsonl."""
     if timestamp_str is None:
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -109,6 +159,7 @@ def log_frame_analysis(photo_path, detections, timestamp_str=None):
         "photo": photo_path,
         "timestamp": timestamp_str,
         "detections": detections,
+        "plate_number": plate_number,
     }
     try:
         with open(ANALYSIS_LOG_PATH, "a", encoding="utf-8") as f:
@@ -117,7 +168,7 @@ def log_frame_analysis(photo_path, detections, timestamp_str=None):
         print(f"[WARN] Gagal tulis log: {e}")
 
 
-def update_latest_analysis(photo_path, detections, timestamp_str=None):
+def update_latest_analysis(photo_path, detections, timestamp_str=None, plate_number=None):
     """Overwrite latest_analysis.json dengan hasil terbaru."""
     if timestamp_str is None:
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -126,6 +177,7 @@ def update_latest_analysis(photo_path, detections, timestamp_str=None):
         "timestamp": timestamp_str,
         "updated_at": datetime.now().isoformat(),
         "detections": detections,
+        "plate_number": plate_number,
     }
     try:
         with open(LATEST_ANALYSIS_PATH, "w", encoding="utf-8") as f:
@@ -134,7 +186,7 @@ def update_latest_analysis(photo_path, detections, timestamp_str=None):
         print(f"[WARN] Gagal update latest: {e}")
 
 
-def send_to_laravel(vehicle_type, color, confidence):
+def send_to_laravel(vehicle_type, color, confidence, plate_number=None):
     """POST ke Laravel."""
     global _last_sent_time
     data = {
@@ -143,6 +195,8 @@ def send_to_laravel(vehicle_type, color, confidence):
         "confidence": round(confidence, 2),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if plate_number:
+        data["plate_number"] = plate_number
     try:
         r = requests.post(LARAVEL_URL, json=data, timeout=3)
         if r.ok:
@@ -162,11 +216,20 @@ def capture_and_detect():
     4. Jika ada: log + update JSON (+ kirim Laravel jika mode Laravel)
     """
     global _running, _last_sent_time
-    cap = None
     current_delay = _reconnect_delay
-    last_capture_time = 0
+    next_capture_time = time.time()
+    cap = None
 
     while _running:
+        now = time.time()
+        # Tunggu sampai tepat waktu capture berikutnya
+        if now < next_capture_time:
+            time.sleep(min(0.1, next_capture_time - now))
+            continue
+        # Atur jadwal capture berikutnya supaya konsisten setiap CAPTURE_INTERVAL_SEC
+        next_capture_time += CAPTURE_INTERVAL_SEC
+
+        # Pastikan koneksi ke webcam hanya dibuka sekali dan dipertahankan
         if cap is None or not cap.isOpened():
             print(f"[INFO] Menghubungkan ke webcam: {WEBCAM_URL}")
             cap = cv2.VideoCapture(WEBCAM_URL)
@@ -174,28 +237,23 @@ def capture_and_detect():
                 print(f"[ERROR] Gagal buka stream, retry dalam {current_delay}s...")
                 time.sleep(current_delay)
                 current_delay = min(current_delay + 2, _max_reconnect_delay)
+                cap = None
                 continue
+
             current_delay = _reconnect_delay
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-            print(f"[INFO] Webcam terhubung. Foto disimpan setiap {CAPTURE_INTERVAL_SEC} detik di: {STORAGE_DIR}")
 
+        # Flush beberapa frame supaya tidak pakai frame yang terlalu lama
         ret, frame = cap.read()
         if not ret or frame is None:
+            print("[WARN] Frame gagal, akan coba reconnect...")
             cap.release()
             cap = None
-            print("[WARN] Frame gagal, reconnect...")
             time.sleep(current_delay)
             continue
-
-        now = time.time()
-        if now - last_capture_time < CAPTURE_INTERVAL_SEC:
-            time.sleep(0.1)
-            continue
-
-        last_capture_time = now
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         filename_base = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -220,11 +278,15 @@ def capture_and_detect():
                     print(f"[INFO] Gambar dihapus (tidak ada kendaraan): {path_rel}")
             continue
 
-        # 3. Ada kendaraan: log + update JSON
+        # 3. Coba baca plat nomor via PlateRecognizer (jika token tersedia)
+        plate_info = recognize_plate(path_abs)
+        plate_number = plate_info.get("plate") if plate_info else None
+
+        # 4. Ada kendaraan: log + update JSON (sekalian simpan plate_number kalau ada)
         try:
-            log_frame_analysis(path_rel, detections, timestamp_str)
-            update_latest_analysis(path_rel, detections, timestamp_str)
-            print(f"[INFO] Update: frame_analysis.jsonl + latest_analysis.json")
+            log_frame_analysis(path_rel, detections, timestamp_str, plate_number=plate_number)
+            update_latest_analysis(path_rel, detections, timestamp_str, plate_number=plate_number)
+            print(f"[INFO] Update: frame_analysis.jsonl + latest_analysis.json (plate={plate_number})")
         except Exception as e:
             print(f"[WARN] Gagal log: {e}")
 
@@ -234,7 +296,12 @@ def capture_and_detect():
                 f"Warna: {d['color']} | Conf: {d['confidence']:.2f}"
             )
             if LARAVEL_MODE and (now - _last_sent_time >= COOLDOWN_SEC):
-                send_to_laravel(d["vehicle_type"], d["color"], d["confidence"])
+                send_to_laravel(
+                    d["vehicle_type"],
+                    d["color"],
+                    d["confidence"],
+                    plate_number=plate_number,
+                )
                 _last_sent_time = now
                 break
 

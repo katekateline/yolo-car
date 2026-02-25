@@ -127,6 +127,13 @@ Letakkan **yolov8m.pt** di folder root project, atau **best.pt** di dalam `yolo_
 - **CAPTURE_INTERVAL_SEC** – Interval pengambilan foto (detik), default 5
 - **DELETE_IMAGE_IF_NO_VEHICLE** – `True` = hapus foto jika tidak ada kendaraan; `False` = simpan semua foto
 
+### 3.5 Integrasi PlateRecognizer (plat nomor)
+
+- Service Python akan mencoba memanggil API **PlateRecognizer** untuk membaca plat nomor dari foto yang sudah terdeteksi ada kendaraan.
+- Endpoint yang dipakai: `https://api.platerecognizer.com/v1/plate-reader/`.
+- Token diambil dari environment variable: `PLATERECOGNIZER_TOKEN` (diisi oleh user sendiri).
+- Jika API berhasil dan ada plat terdeteksi, maka field `plate_number` akan ditambahkan ke JSON yang dikirim ke Laravel.
+
 ### 3.4 Jalankan
 
 ```bash
@@ -153,7 +160,8 @@ Jika mode Laravel aktif, Python akan **memanggil** endpoint ini saat ada kendara
   "vehicle_type": "car",
   "color": "hitam",
   "confidence": 0.87,
-  "timestamp": "2026-02-22 14:00:00"
+  "timestamp": "2026-02-22 14:00:00",
+  "plate_number": "B1234XYZ"
 }
 ```
 
@@ -163,6 +171,7 @@ Jika mode Laravel aktif, Python akan **memanggil** endpoint ini saat ada kendara
 | `color`        | string | Warna (merah, biru, hitam, putih, abu, silver, hijau, kuning, orange, ungu, coklat) |
 | `confidence`   | float  | 0–1 |
 | `timestamp`    | string | `YYYY-MM-DD HH:MM:SS` |
+| `plate_number` | string | (opsional) Nomor plat yang dibaca dari PlateRecognizer; bisa `null` jika tidak terbaca |
 
 Laravel harus mengembalikan HTTP 2xx (mis. 200/201) agar Python menganggap kirim sukses.
 
@@ -185,7 +194,7 @@ Laravel harus mengembalikan HTTP 2xx (mis. 200/201) agar Python menganggap kirim
 
 ```
 Buat/update endpoint Laravel: POST /api/detection
-- Menerima JSON: vehicle_type (car|motorcycle|truck|bus), color, confidence (0-1), timestamp.
+- Menerima JSON: vehicle_type (car|motorcycle|truck|bus), color, confidence (0-1), timestamp, plate_number (opsional).
 - Validasi, simpan ke DB/cache, return 2xx.
 - Untuk tampilkan deteksi terbaru tanpa menunggu POST, Laravel bisa polling GET http://localhost:5000/latest ke Python (field: photo, timestamp, detections).
 ```
@@ -210,6 +219,7 @@ public function store(Request $request)
         'color'        => 'required|string|max:50',
         'confidence'   => 'required|numeric|min:0|max:1',
         'timestamp'    => 'required|string',
+        'plate_number' => 'nullable|string|max:50',
     ]);
     Cache::put('latest_detection', $validated, 3600);
     return response()->json(['success' => true, 'data' => $validated], 201);
