@@ -50,24 +50,26 @@ def get_dominant_color(frame, bbox):
     if body_crop.size == 0:
         body_crop = frame[y1:y2, x1:x2] # Fallback ke full bbox
 
-    # Resize lebih kecil lagi untuk mempercepat K-Means secara signifikan
-    # (30x30 sudah sangat cukup untuk mendapatkan warna dominan body)
-    small = cv2.resize(body_crop, (30, 30), interpolation=cv2.INTER_AREA)
+    # Resize untuk mempercepat K-Means
+    small = cv2.resize(body_crop, (40, 40), interpolation=cv2.INTER_AREA)
     pixels = small.reshape(-1, 3).astype(np.float32)
 
-    # Filter pixel (dipercepat)
+    # Filter pixel yang terlalu gelap (hitam/bayangan) atau terlalu terang (refleksi cahaya)
+    # agar tidak mengacaukan warna dominan cat
     v_max = np.max(pixels, axis=1)
+    v_min = np.min(pixels, axis=1)
+    # Masking: value tidak boleh terlalu gelap (<30) dan saturasi tidak boleh nol jika sangat terang
     mask = (v_max > 30) & (v_max < 250)
     filtered_pixels = pixels[mask]
 
-    if len(filtered_pixels) < 5:
-        filtered_pixels = pixels
+    if len(filtered_pixels) < 10:
+        filtered_pixels = pixels # Fallback jika terlalu banyak yang terfilter
 
-    # --- K-MEANS CLUSTERING (K=2 untuk kecepatan maksimal) ---
-    # Mengurangi jumlah K dan iterasi untuk hasil instan
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5, 1.0)
-    K = min(2, len(filtered_pixels))
-    _, labels, centers = cv2.kmeans(filtered_pixels, K, None, criteria, 1, cv2.KMEANS_RANDOM_CENTERS)
+    # --- K-MEANS CLUSTERING (K=3) ---
+    # Mencari 3 kelompok warna utama (Cat Body, Bayangan, Refleksi)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    K = min(3, len(filtered_pixels))
+    _, labels, centers = cv2.kmeans(filtered_pixels, K, None, criteria, 5, cv2.KMEANS_RANDOM_CENTERS)
 
     # Hitung jumlah pixel per cluster
     counts = np.bincount(labels.flatten())

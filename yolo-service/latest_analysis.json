@@ -1,21 +1,21 @@
 {
-  "photo": "storage/20260414_205803_3bdc7c03.jpg",
-  "timestamp": "2026-04-14 20:58:03",
-  "updated_at": "2026-04-14T20:58:13.777596",
+  "photo": "storage/20260414_212725_2fe2a7ed.jpg",
+  "timestamp": "2026-04-14 21:27:25",
+  "updated_at": "2026-04-14T21:27:26.366064",
   "detections": [
     {
-      "vehicle_type": "car",
+      "vehicle_type": "motorcycle",
       "color": "merah",
-      "confidence": 0.6884,
+      "confidence": 0.9436,
       "bbox": [
-        95,
-        128,
-        979,
-        603
+        92,
+        104,
+        414,
+        406
       ],
-      "plate_number": "B1945RF"
+      "plate_number": null
     }
   ],
-  "plate_number": "B1945RF",
+  "plate_number": null,
   "qr_codes": []
 }

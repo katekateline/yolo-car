@@ -308,28 +308,6 @@ def send_to_laravel(vehicle_type, color, confidence, plate_number=None, qr_codes
         print(f"[ERROR] Gagal kirim: {e}")
 
 
-def async_plate_and_callback(vehicle_crop, vehicle_type, response_body, detections_idx):
-    """
-    Fungsi background:
-    1. Ambil plat nomor via API.
-    2. Update response_body.
-    3. Kirim callback final ke Laravel.
-    """
-    plate_info = recognize_plate(vehicle_crop, vehicle_type=vehicle_type)
-    plate_number = plate_info.get("plate") if plate_info else None
-    
-    # Update data di response body (untuk keperluan logging/callback)
-    if plate_number:
-        response_body["detections"][detections_idx]["plate_number"] = plate_number
-        if response_body["plate_number"] is None:
-            response_body["plate_number"] = plate_number
-
-    # Selalu kirim callback final ke Laravel setelah plat selesai (jika diaktifkan)
-    if LARAVEL_CALLBACK_AFTER_ANALYZE:
-        print(f"[INFO] Mengirim callback final ke Laravel (Plat: {plate_number})")
-        send_analysis_payload_to_laravel(response_body)
-
-
 def send_analysis_payload_to_laravel(payload):
     """POST hasil lengkap POST /analyze ke Laravel (callback server-to-server)."""
     try:
@@ -406,6 +384,61 @@ def analyze():
     qr_codes = []
     plate_number = None
 
+    if scan_type == "qr":
+        # Mode scan QR codes saja
+        qr_codes = detect_qr_codes(frame)
+    else:
+        # Mode scan kendaraan (default)
+        try:
+            det = ensure_detector()
+            detections = det.process_frame(frame, process_vehicle_only=True)
+        except Exception as e:
+            delete_image(path_abs)
+            return jsonify({"success": False, "error": "detection_failed", "message": str(e)}), 500
+
+        if detections:
+            # Coba deteksi plat untuk setiap kendaraan yang terdeteksi
+            for d in detections:
+                x1, y1, x2, y2 = d["bbox"]
+                # Crop kendaraan dengan padding lebih luas agar plat tidak terpotong
+                h, w = frame.shape[:2]
+                pad = 50
+                cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
+                cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
+                vehicle_crop = frame[cy1:cy2, cx1:cx2]
+
+                # Kirim crop ke PlateRecognizer API dengan informasi tipe kendaraan
+                plate_info = recognize_plate(vehicle_crop, vehicle_type=d["vehicle_type"])
+                if plate_info and plate_info.get("plate"):
+                    d["plate_number"] = plate_info["plate"]
+                    if plate_number is None:
+                        plate_number = d["plate_number"]
+                else:
+                    d["plate_number"] = None
+        else:
+            if DELETE_IMAGE_IF_NO_VEHICLE:
+                delete_image(path_abs)
+                path_rel = None
+
+    # Logging & Update JSON
+    try:
+        log_frame_analysis(
+            path_rel,
+            detections,
+            timestamp_str,
+            plate_number=plate_number,
+            qr_codes=qr_codes,
+        )
+        update_latest_analysis(
+            path_rel,
+            detections,
+            timestamp_str,
+            plate_number=plate_number,
+            qr_codes=qr_codes,
+        )
+    except Exception as e:
+        print(f"[WARN] Gagal log: {e}")
+
     response_body = {
         "success": True,
         "scan_type": scan_type,
@@ -418,69 +451,6 @@ def analyze():
         "qr_codes": qr_codes,
         "qr_texts": [q.get("text") for q in qr_codes if q.get("text")],
     }
-    
-    # Simpan referensi response body untuk diupdate oleh thread async
-    response_body_ref = response_body
-
-    if scan_type == "qr":
-        # Mode scan QR codes saja
-        qr_codes = detect_qr_codes(frame)
-        response_body["qr_codes"] = qr_codes
-        response_body["qr_texts"] = [q.get("text") for q in qr_codes if q.get("text")]
-    else:
-        # Mode scan kendaraan (default)
-        try:
-            det = ensure_detector()
-            detections = det.process_frame(frame, process_vehicle_only=True)
-            response_body["detections"] = detections
-        except Exception as e:
-            delete_image(path_abs)
-            return jsonify({"success": False, "error": "detection_failed", "message": str(e)}), 500
-
-        if detections:
-            # Iterasi kendaraan: Ambil tipe & warna (INSTAN), lalu jalankan plat di background (ASYNC)
-            for i, d in enumerate(detections):
-                x1, y1, x2, y2 = d["bbox"]
-                h, w = frame.shape[:2]
-                pad = 50
-                cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
-                cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
-                vehicle_crop = frame[cy1:cy2, cx1:cx2].copy() # Copy agar thread aman
-
-                # Inisialisasi plat nomor sebagai None di response awal (Super Cepat)
-                d["plate_number"] = None
-                
-                # Jalankan deteksi plat nomor di background (Async)
-                # Thread ini juga akan menangani callback LARAVEL_CALLBACK_AFTER_ANALYZE jika aktif
-                t = threading.Thread(
-                    target=async_plate_and_callback, 
-                    args=(vehicle_crop, d["vehicle_type"], response_body_ref, i)
-                )
-                t.start()
-        else:
-            if DELETE_IMAGE_IF_NO_VEHICLE:
-                delete_image(path_abs)
-                path_rel = None
-                response_body["photo"] = None
-    
-    # Logging & Update JSON (Versi awal tanpa plat)
-    try:
-        log_frame_analysis(
-            path_rel,
-            detections,
-            timestamp_str,
-            plate_number=None,
-            qr_codes=qr_codes,
-        )
-        update_latest_analysis(
-            path_rel,
-            detections,
-            timestamp_str,
-            plate_number=None,
-            qr_codes=qr_codes,
-        )
-    except Exception as e:
-        print(f"[WARN] Gagal log awal: {e}")
     
     if detections:
         first = detections[0]
