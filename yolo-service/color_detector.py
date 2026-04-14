@@ -23,91 +23,126 @@ COLOR_NAMES = [
 
 def get_dominant_color(frame, bbox):
     """
-    Ambil warna dominan dari crop bounding box kendaraan.
-    Metode cepat: resize kecil (50x50), rata-rata RGB, mapping ke nama warna.
-
-    Args:
-        frame: Frame BGR dari OpenCV
-        bbox: [x1, y1, x2, y2]
-
-    Returns:
-        str: Nama warna (merah, biru, hitam, putih, abu, dll)
+    Ambil warna dominan dari body kendaraan menggunakan K-Means Clustering.
+    Fokus pada area tengah body untuk menghindari gangguan background, ban, dan kaca.
     """
     x1, y1, x2, y2 = map(int, bbox)
-    h, w = frame.shape[:2]
+    h_frame, w_frame = frame.shape[:2]
+    
     # Clamp ke batas frame
-    x1, x2 = max(0, x1), min(w, x2)
-    y1, y2 = max(0, y1), min(h, y2)
+    x1, x2 = max(0, x1), min(w_frame, x2)
+    y1, y2 = max(0, y1), min(h_frame, y2)
+    
     if x2 <= x1 or y2 <= y1:
         return "abu"
 
-    vehicle_crop = frame[y1:y2, x1:x2]
-    if vehicle_crop.size == 0:
+    # --- CROP AREA BODY (CENTRAL CROP) ---
+    # Kita ambil area tengah (40% - 70% tinggi, 20% - 80% lebar) 
+    # untuk mendapatkan warna cat body, bukan kaca/ban/background
+    w = x2 - x1
+    h = y2 - y1
+    cx1 = x1 + int(w * 0.2)
+    cx2 = x1 + int(w * 0.8)
+    cy1 = y1 + int(h * 0.3) # Hindari atap/kaca depan
+    cy2 = y1 + int(h * 0.7) # Hindari ban/kolong
+    
+    body_crop = frame[cy1:cy2, cx1:cx2]
+    if body_crop.size == 0:
+        body_crop = frame[y1:y2, x1:x2] # Fallback ke full bbox
+
+    # Resize lebih kecil lagi untuk mempercepat K-Means secara signifikan
+    # (30x30 sudah sangat cukup untuk mendapatkan warna dominan body)
+    small = cv2.resize(body_crop, (30, 30), interpolation=cv2.INTER_AREA)
+    pixels = small.reshape(-1, 3).astype(np.float32)
+
+    # Filter pixel (dipercepat)
+    v_max = np.max(pixels, axis=1)
+    mask = (v_max > 30) & (v_max < 250)
+    filtered_pixels = pixels[mask]
+
+    if len(filtered_pixels) < 5:
+        filtered_pixels = pixels
+
+    # --- K-MEANS CLUSTERING (K=2 untuk kecepatan maksimal) ---
+    # Mengurangi jumlah K dan iterasi untuk hasil instan
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5, 1.0)
+    K = min(2, len(filtered_pixels))
+    _, labels, centers = cv2.kmeans(filtered_pixels, K, None, criteria, 1, cv2.KMEANS_RANDOM_CENTERS)
+
+    # Hitung jumlah pixel per cluster
+    counts = np.bincount(labels.flatten())
+    
+    # Cari cluster dengan saturasi tertinggi atau yang paling dominan
+    # Cat kendaraan biasanya memiliki saturasi lebih tinggi daripada bayangan/abu-abu
+    best_color = None
+    max_score = -1
+
+    for i in range(len(centers)):
+        b, g, r = centers[i]
+        # Konversi ke HSV untuk analisa kualitas warna
+        hsv = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0, 0]
+        hue, sat, val = hsv
+        
+        # Skor: Gabungan antara dominansi jumlah pixel dan saturasi
+        # Warna cat asli biasanya dominan DAN punya saturasi
+        score = counts[i] * (sat + 1) 
+        
+        if score > max_score:
+            max_score = score
+            best_color = (r, g, b)
+
+    if best_color is None:
         return "abu"
 
-    # Resize kecil untuk proses cepat
-    small = cv2.resize(vehicle_crop, (50, 50))
-    # Rata-rata RGB (abaikan pixel terlalu gelap/terang untuk stabil)
-    b, g, r = cv2.split(small)
-    b_flat = b.flatten()
-    g_flat = g.flatten()
-    r_flat = r.flatten()
-    v_flat = np.maximum(np.maximum(r_flat, g_flat), b_flat)
-    valid = (v_flat >= 30) & (v_flat <= 250)
-    if valid.sum() < 100:
-        valid = v_flat >= 20
-    if valid.sum() == 0:
-        return "abu"
-    r_avg = int(np.mean(r_flat[valid]))
-    g_avg = int(np.mean(g_flat[valid]))
-    b_avg = int(np.mean(b_flat[valid]))
-
-    return _rgb_to_color_name(r_avg, g_avg, b_avg)
+    return _rgb_to_color_name(best_color[0], best_color[1], best_color[2])
 
 
 def _rgb_to_color_name(r, g, b):
     """
-    Mapping warna rata-rata ke nama warna menggunakan HSV
-    (lebih stabil untuk putih/abu/orange/kuning).
+    Mapping warna ke nama Indonesia dengan threshold HSV yang lebih presisi.
     """
-    # OpenCV pakai BGR, jadi buat pixel BGR dan konversi ke HSV
     bgr_pixel = np.uint8([[[b, g, r]]])
     hsv = cv2.cvtColor(bgr_pixel, cv2.COLOR_BGR2HSV)[0, 0]
     h, s, v = int(hsv[0]), int(hsv[1]), int(hsv[2])
 
-    # 1. Hitam / sangat gelap
-    if v < 40:
+    # 1. Hitam (Value sangat rendah)
+    if v < 45:
         return "hitam"
 
-    # 2. Putih (sangat terang, saturasi rendah)
-    if v > 210 and s < 40:
+    # 2. Putih (Saturasi rendah, Value tinggi)
+    if s < 35 and v > 190:
         return "putih"
 
-    # 3. Abu / silver (saturasi rendah, tapi tidak seputih putih)
-    if s < 40:
-        if v >= 180:
-            return "silver"
+    # 3. Abu-abu / Silver (Saturasi rendah)
+    if s < 45:
+        if v > 160: return "silver"
         return "abu"
 
-    # 4. Warna kromatik berdasarkan Hue (H: 0–179)
-    # Red: sekitar 0 atau 180
-    if h < 10 or h >= 170:
+    # 4. Warna Berdasarkan Hue (0-179)
+    # Merah (0-8 atau 165-179)
+    if h < 8 or h >= 165:
         return "merah"
-    # Orange: 10–24
-    if 10 <= h < 24:
+    
+    # Orange (8-20) - Diperketat agar tidak campur dengan merah/kuning
+    if 8 <= h < 20:
         return "orange"
-    # Kuning: 24–35
-    if 24 <= h < 35:
+    
+    # Kuning (20-36)
+    if 20 <= h < 36:
         return "kuning"
-    # Hijau: 35–85
-    if 35 <= h < 85:
+    
+    # Hijau (36-85)
+    if 36 <= h < 85:
         return "hijau"
-    # Biru: 85–130
-    if 85 <= h < 130:
+    
+    # Biru (85-135)
+    if 85 <= h < 135:
         return "biru"
-    # Ungu / magenta: 130–170
-    if 130 <= h < 170:
+    
+    # Ungu / Magenta (135-165)
+    if 135 <= h < 165:
+        # Tambahan: Cek jika saturasi ungu rendah, bisa jadi itu refleksi kebiruan/abu
+        if s < 60: return "abu"
         return "ungu"
 
-    # Fallback
     return "abu"

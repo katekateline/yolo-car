@@ -1,0 +1,21 @@
+{
+  "photo": "storage/20260414_205803_3bdc7c03.jpg",
+  "timestamp": "2026-04-14 20:58:03",
+  "updated_at": "2026-04-14T20:58:13.777596",
+  "detections": [
+    {
+      "vehicle_type": "car",
+      "color": "merah",
+      "confidence": 0.6884,
+      "bbox": [
+        95,
+        128,
+        979,
+        603
+      ],
+      "plate_number": "B1945RF"
+    }
+  ],
+  "plate_number": "B1945RF",
+  "qr_codes": []
+}

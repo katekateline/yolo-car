@@ -25,7 +25,7 @@ LARAVEL_URL = os.getenv("LARAVEL_URL", "http://localhost:8000/api/detection")
 
 # PlateRecognizer (API plat nomor)
 PLATERECOGNIZER_URL = "https://api.platerecognizer.com/v1/plate-reader/"
-PLATERECOGNIZER_TOKEN = os.getenv("PLATERECOGNIZER_TOKEN", "")
+PLATERECOGNIZER_TOKEN = os.getenv("PLATERECOGNIZER_TOKEN", "71ec7eb1f904d47da060fa4bd532d76cc18edeee")
 # Optional: region plate, contoh: ["id"] atau ["us-ca"]
 PLATERECOGNIZER_REGIONS = None  # bisa dioverride via env jika perlu
 
@@ -68,6 +68,98 @@ _reconnect_delay = 2
 _max_reconnect_delay = 30
 
 
+def recognize_plate(image_path_or_frame, vehicle_type="car"):
+    """
+    Membaca plat nomor dari gambar atau frame menggunakan PlateRecognizer API.
+    Optimasi: crop area plat nomor (heuristic) + resize & kompresi untuk performa.
+    Returns dict minimal: {"plate": str | None} atau None jika gagal.
+    """
+    if not PLATERECOGNIZER_TOKEN:
+        print("[WARN] PLATERECOGNIZER_TOKEN tidak ditemukan.")
+        return None
+
+    # Bersihkan URL (hapus trailing slash jika ada, requests akan menanganinya atau API mungkin sensitif)
+    api_url = PLATERECOGNIZER_URL.rstrip('/')
+
+    plate_text = None
+    try:
+        # Parameter POST (sesuai dokumentasi)
+        params = {}
+        if PLATERECOGNIZER_REGIONS:
+            params["regions"] = PLATERECOGNIZER_REGIONS
+        
+        # Gunakan mode "fast" untuk mempercepat respon API hingga 30%
+        # Dokumentasi: {"mode":"fast"}
+        params["config"] = json.dumps({"mode": "fast"})
+
+        # Load image if it's a path
+        if isinstance(image_path_or_frame, str) and os.path.isfile(image_path_or_frame):
+            img = cv2.imread(image_path_or_frame)
+        else:
+            img = image_path_or_frame
+
+        if img is None:
+            return None
+
+        h, w = img.shape[:2]
+
+        # --- HEURISTIC CROP (MENGAMBIL AREA PLAT NOMOR) ---
+        if vehicle_type in ["car", "bus", "truck"]:
+            y_start = int(h * 0.4)
+            x_start = int(w * 0.1)
+            x_end = int(w * 0.9)
+            img = img[y_start:h, x_start:x_end]
+        elif vehicle_type == "motorcycle":
+            y_start = int(h * 0.3)
+            img = img[y_start:h, :]
+        
+        h, w = img.shape[:2]
+
+        # --- Optimasi Gambar ---
+        max_dim = 800 # Perkecil lagi untuk memastikan pengiriman instan
+        if max(h, w) > max_dim:
+            scale = max_dim / float(max(h, w))
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        
+        _, img_encoded = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        img_bytes = img_encoded.tobytes()
+
+        # --- Request ke API ---
+        print(f"[INFO] Mengirim ke PlateRecognizer: {api_url} ({len(img_bytes)/1024:.1f} KB)...")
+        
+        # Gunakan timeout terpisah untuk connect dan read
+        # Connect timeout: 10s, Read timeout: 30s
+        response = requests.post(
+            api_url,
+            data=params,
+            files={"upload": ("image.jpg", img_bytes, "image/jpeg")},
+            headers={"Authorization": f"Token {PLATERECOGNIZER_TOKEN}"},
+            timeout=(10, 30),
+        )
+
+        if response.ok:
+            res_json = response.json()
+            results = res_json.get("results") or []
+            if results:
+                plate_text = results[0].get("plate", "").upper()
+                print(f"[INFO] PlateRecognizer berhasil: {plate_text} (Time: {res_json.get('processing_time', 0)}ms)")
+            else:
+                print(f"[INFO] PlateRecognizer: Tidak ada plat nomor terdeteksi pada area crop.")
+        else:
+            print(f"[ERROR] PlateRecognizer status {response.status_code}: {response.text}")
+            
+    except requests.exceptions.ConnectTimeout:
+        print(f"[ERROR] Koneksi ke PlateRecognizer API gagal (Connect Timeout). Cek DNS/Internet.")
+    except requests.exceptions.ReadTimeout:
+        print(f"[ERROR] PlateRecognizer API tidak merespon dalam 30 detik (Read Timeout).")
+    except Exception as e:
+        print(f"[WARN] PlateRecognizer API gagal (Error Lain): {type(e).__name__} - {e}")
+
+    if plate_text:
+        return {"plate": plate_text}
+    return None
+
+
 def detect_qr_codes(frame):
     """
     Deteksi QR code dari frame BGR.
@@ -87,7 +179,8 @@ def detect_qr_codes(frame):
                     pts = points[i].astype(int).tolist()
                     item["points"] = pts
                 results.append(item)
-            return results
+            if results:
+                return results
     except Exception:
         pass
 
@@ -101,7 +194,7 @@ def detect_qr_codes(frame):
                 item["points"] = pts.astype(int).tolist()
             results.append(item)
     except Exception:
-        return []
+        pass
     return results
 
 
@@ -122,49 +215,6 @@ def ensure_detector():
         _detector = VehicleDetector(model_path=mp, confidence=CONFIDENCE_THRESHOLD)
         print(f"[INFO] Model: {mp}")
     return _detector
-
-
-def recognize_plate(image_path):
-    """
-    Panggil API PlateRecognizer untuk membaca plat nomor dari gambar.
-    Returns dict minimal: {"plate": str | None} atau None jika gagal/tidak ada.
-    """
-    if not PLATERECOGNIZER_TOKEN:
-        # Jika belum ada token, skip quietly
-        return None
-
-    if not os.path.isfile(image_path):
-        return None
-
-    try:
-        data = {}
-        if PLATERECOGNIZER_REGIONS:
-            data["regions"] = PLATERECOGNIZER_REGIONS
-
-        with open(image_path, "rb") as fp:
-            response = requests.post(
-                PLATERECOGNIZER_URL,
-                data=data,
-                files={"upload": fp},
-                headers={"Authorization": f"Token {PLATERECOGNIZER_TOKEN}"},
-                timeout=10,
-            )
-
-        if not response.ok:
-            print(f"[WARN] PlateRecognizer status {response.status_code}: {response.text[:200]}")
-            return None
-
-        res_json = response.json()
-        results = res_json.get("results") or []
-        if not results:
-            return None
-
-        first = results[0]
-        plate = first.get("plate")
-        return {"plate": plate}
-    except Exception as e:
-        print(f"[WARN] Gagal panggil PlateRecognizer: {e}")
-        return None
 
 
 def save_frame(frame, filename_base=None):
@@ -258,6 +308,28 @@ def send_to_laravel(vehicle_type, color, confidence, plate_number=None, qr_codes
         print(f"[ERROR] Gagal kirim: {e}")
 
 
+def async_plate_and_callback(vehicle_crop, vehicle_type, response_body, detections_idx):
+    """
+    Fungsi background:
+    1. Ambil plat nomor via API.
+    2. Update response_body.
+    3. Kirim callback final ke Laravel.
+    """
+    plate_info = recognize_plate(vehicle_crop, vehicle_type=vehicle_type)
+    plate_number = plate_info.get("plate") if plate_info else None
+    
+    # Update data di response body (untuk keperluan logging/callback)
+    if plate_number:
+        response_body["detections"][detections_idx]["plate_number"] = plate_number
+        if response_body["plate_number"] is None:
+            response_body["plate_number"] = plate_number
+
+    # Selalu kirim callback final ke Laravel setelah plat selesai (jika diaktifkan)
+    if LARAVEL_CALLBACK_AFTER_ANALYZE:
+        print(f"[INFO] Mengirim callback final ke Laravel (Plat: {plate_number})")
+        send_analysis_payload_to_laravel(response_body)
+
+
 def send_analysis_payload_to_laravel(payload):
     """POST hasil lengkap POST /analyze ke Laravel (callback server-to-server)."""
     try:
@@ -306,6 +378,9 @@ def analyze():
             "message": "Kirim multipart dengan field 'image' (file foto).",
         }), 400
 
+    # Ambil parameter scan_type (default: vehicle)
+    scan_type = request.form.get("scan_type", "vehicle")
+
     upload = request.files["image"]
     if not upload or upload.filename == "":
         return jsonify({"success": False, "error": "empty_file"}), 400
@@ -326,42 +401,14 @@ def analyze():
         return jsonify({"success": False, "error": "save_failed"}), 500
 
     timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        det = ensure_detector()
-        detections = det.process_frame(frame, process_vehicle_only=True)
-    except Exception as e:
-        delete_image(path_abs)
-        return jsonify({"success": False, "error": "detection_failed", "message": str(e)}), 500
-
-    qr_codes = detect_qr_codes(frame)
+    
+    detections = []
+    qr_codes = []
     plate_number = None
-    if detections:
-        plate_info = recognize_plate(path_abs)
-        plate_number = plate_info.get("plate") if plate_info else None
-        try:
-            log_frame_analysis(
-                path_rel,
-                detections,
-                timestamp_str,
-                plate_number=plate_number,
-                qr_codes=qr_codes,
-            )
-            update_latest_analysis(
-                path_rel,
-                detections,
-                timestamp_str,
-                plate_number=plate_number,
-                qr_codes=qr_codes,
-            )
-        except Exception as e:
-            print(f"[WARN] Gagal log: {e}")
-    else:
-        if DELETE_IMAGE_IF_NO_VEHICLE:
-            delete_image(path_abs)
-            path_rel = None
 
     response_body = {
         "success": True,
+        "scan_type": scan_type,
         "source": "yolo_analyze_upload",
         "timestamp": timestamp_str,
         "updated_at": datetime.now().isoformat(),
@@ -371,6 +418,70 @@ def analyze():
         "qr_codes": qr_codes,
         "qr_texts": [q.get("text") for q in qr_codes if q.get("text")],
     }
+    
+    # Simpan referensi response body untuk diupdate oleh thread async
+    response_body_ref = response_body
+
+    if scan_type == "qr":
+        # Mode scan QR codes saja
+        qr_codes = detect_qr_codes(frame)
+        response_body["qr_codes"] = qr_codes
+        response_body["qr_texts"] = [q.get("text") for q in qr_codes if q.get("text")]
+    else:
+        # Mode scan kendaraan (default)
+        try:
+            det = ensure_detector()
+            detections = det.process_frame(frame, process_vehicle_only=True)
+            response_body["detections"] = detections
+        except Exception as e:
+            delete_image(path_abs)
+            return jsonify({"success": False, "error": "detection_failed", "message": str(e)}), 500
+
+        if detections:
+            # Iterasi kendaraan: Ambil tipe & warna (INSTAN), lalu jalankan plat di background (ASYNC)
+            for i, d in enumerate(detections):
+                x1, y1, x2, y2 = d["bbox"]
+                h, w = frame.shape[:2]
+                pad = 50
+                cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
+                cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
+                vehicle_crop = frame[cy1:cy2, cx1:cx2].copy() # Copy agar thread aman
+
+                # Inisialisasi plat nomor sebagai None di response awal (Super Cepat)
+                d["plate_number"] = None
+                
+                # Jalankan deteksi plat nomor di background (Async)
+                # Thread ini juga akan menangani callback LARAVEL_CALLBACK_AFTER_ANALYZE jika aktif
+                t = threading.Thread(
+                    target=async_plate_and_callback, 
+                    args=(vehicle_crop, d["vehicle_type"], response_body_ref, i)
+                )
+                t.start()
+        else:
+            if DELETE_IMAGE_IF_NO_VEHICLE:
+                delete_image(path_abs)
+                path_rel = None
+                response_body["photo"] = None
+    
+    # Logging & Update JSON (Versi awal tanpa plat)
+    try:
+        log_frame_analysis(
+            path_rel,
+            detections,
+            timestamp_str,
+            plate_number=None,
+            qr_codes=qr_codes,
+        )
+        update_latest_analysis(
+            path_rel,
+            detections,
+            timestamp_str,
+            plate_number=None,
+            qr_codes=qr_codes,
+        )
+    except Exception as e:
+        print(f"[WARN] Gagal log awal: {e}")
+    
     if detections:
         first = detections[0]
         response_body["vehicle_type"] = first["vehicle_type"]
@@ -381,7 +492,8 @@ def analyze():
         response_body["vehicle_type"] = None
         response_body["color"] = None
         response_body["confidence"] = None
-        response_body["message"] = "no_vehicle"
+        if scan_type != "qr":
+            response_body["message"] = "no_vehicle"
 
     if LARAVEL_CALLBACK_AFTER_ANALYZE:
         send_analysis_payload_to_laravel(dict(response_body))
@@ -460,12 +572,27 @@ def capture_and_detect():
                     print(f"[INFO] Gambar dihapus (tidak ada kendaraan): {path_rel}")
             continue
 
-        # 3. Coba baca QR code + plat nomor via PlateRecognizer
+        # 3. Coba baca QR code + plat nomor per kendaraan
         qr_codes = detect_qr_codes(frame)
-        plate_info = recognize_plate(path_abs)
-        plate_number = plate_info.get("plate") if plate_info else None
+        plate_number = None
+        for d in detections:
+            x1, y1, x2, y2 = d["bbox"]
+            h, w = frame.shape[:2]
+            pad = 50
+            cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
+            cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
+            vehicle_crop = frame[cy1:cy2, cx1:cx2]
 
-        # 4. Ada kendaraan: log + update JSON (simpan plate_number dan qr_codes)
+            # Kirim crop ke PlateRecognizer API dengan informasi tipe kendaraan
+            plate_info = recognize_plate(vehicle_crop, vehicle_type=d["vehicle_type"])
+            if plate_info and plate_info.get("plate"):
+                d["plate_number"] = plate_info["plate"]
+                if plate_number is None:
+                    plate_number = d["plate_number"]
+            else:
+                d["plate_number"] = None
+
+        # 4. Ada kendaraan: log + update JSON
         try:
             log_frame_analysis(
                 path_rel,

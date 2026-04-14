@@ -26,16 +26,30 @@ Default base URL: **http://127.0.0.1:5000** (ubah dengan env `PORT`).
 
 ## 2. POST /analyze (wajib untuk alur Laravel → Python)
 
-Laravel mengirim **multipart/form-data** dengan field file bernama **`image`** (satu foto JPG/PNG).
+Laravel mengirim **multipart/form-data** dengan field file bernama **`image`** (satu foto JPG/PNG) dan field teks **`scan_type`**.
 
 | Item   | Nilai |
 |--------|--------|
 | Method | `POST` |
 | URL    | `http://127.0.0.1:5000/analyze` |
-| Body   | `multipart/form-data`, field **`image`** = file gambar |
+| Body   | `multipart/form-data` |
+| Field `image` | File gambar (JPG/PNG) |
+| Field `scan_type` | `vehicle` (default) atau `qr` |
 | Header opsional | `X-API-Key: <secret>` — hanya jika di Python di-set env `YOLO_SERVICE_API_KEY` |
 
-### Response 200 (sukses) — contoh ada kendaraan
+### Alur Kerja Berdasarkan `scan_type`:
+
+1.  **`scan_type = vehicle` (Default)**:
+    -   Python mengecek apakah ada kendaraan menggunakan model YOLO.
+    -   Jika ada, Python mengidentifikasi **warna** dan **jenis kendaraan**.
+    -   Setelah itu, Python mengirim potongan gambar kendaraan ke **PlateRecognizer API** untuk mendapatkan nomor plat.
+    -   Hasil lengkap dikirim kembali ke Laravel.
+2.  **`scan_type = qr`**:
+    -   Python hanya melakukan scan **QR Code** pada gambar.
+    -   Tidak melakukan deteksi kendaraan atau plat nomor.
+    -   Hasil QR dikirim kembali ke Laravel.
+
+### Response 200 (sukses) — contoh ada kendaraan (`scan_type=vehicle`)
 
 ```json
 {
@@ -174,31 +188,27 @@ public function analyzeFrame(Request $request)
 {
     $request->validate([
         'image' => 'required|image|max:10240',
+        'scan_type' => 'nullable|in:vehicle,qr',
     ]);
 
     $path = $request->file('image')->getRealPath();
+    $scanType = $request->input('scan_type', 'vehicle');
 
-    $http = Http::timeout(120)
-        ->withHeaders([
-            // 'X-API-Key' => config('services.yolo.api_key'), // jika dipakai
-        ]);
+    $http = Http::timeout(120);
 
     $response = $http->attach(
         'image',
         file_get_contents($path),
         $request->file('image')->getClientOriginalName()
-    )->post('http://127.0.0.1:5000/analyze');
+    )->post('http://127.0.0.1:5000/analyze', [
+        'scan_type' => $scanType
+    ]);
 
     if (!$response->successful()) {
         return response()->json(['error' => 'YOLO service error', 'body' => $response->body()], 502);
     }
 
-    $data = $response->json();
-
-    // Simpan ke DB / tampilkan di UI
-    // $data['detections'], $data['plate_number'], $data['qr_codes'], $data['qr_texts'], ...
-
-    return response()->json($data);
+    return response()->json($response->json());
 }
 ```
 

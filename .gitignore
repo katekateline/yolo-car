@@ -1,5 +1,21 @@
+# Models and Data
 /model
+/yolo-service/models/
+/yolo-service/storage/
 *.pt
+*.pth
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+venv/
 .env
-yolo_service/storage/
+
+# Logs
+*.jsonl
+latest_analysis.json
+
+# IDE
+.vscode/
+.idea/
